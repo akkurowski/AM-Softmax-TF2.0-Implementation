@@ -1,0 +1,6 @@
+__pycache__
+_data_speech/*
+_network_trn_backup/*
+_progress_logs/*
+_stored_data/*
+parameterized_dataset.dat
