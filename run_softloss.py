@@ -192,7 +192,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.layers import PReLU
-import keras.backend as K
+import tensorflow.keras.backend as K
 
 # Jako kształt wejścia sieci potrzebujemy kształtu pojedynczego MFCC-gramu z liczbą kanałów równą 1
 # (o co już wcześniej zadbaliśmy).
