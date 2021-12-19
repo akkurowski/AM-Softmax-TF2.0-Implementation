@@ -616,6 +616,7 @@ if not skip_training:
                     autoencoder.load_weights(os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,best_specimen_bkp_name))
                 except:
                     print("Best weights not found, saving the latest weights set (maybe the training was too short).")
+                    autoencoder.save_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
             autoencoder.save_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
     else:
         print('wagi zostaną skasowane')

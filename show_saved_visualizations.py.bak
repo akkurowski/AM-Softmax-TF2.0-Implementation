@@ -82,8 +82,7 @@ if tSNE_data_present:
     make_labelmasked_plot_2D(reduced_parameters_tSNE, people_list, title='t-SNE',xlabel='1. komponent t-SNE',ylabel='2. komponent t-SNE')
 try:
     make_labelmasked_plot_3D(vis3D_reduced_parameters_PCA, vis3D_people_list, title='PCA',xlabel='1. komponent PCA',ylabel='2. komponent PCA',zlabel='3. komponent PCA')
-    if LDA_data_present:
-        make_labelmasked_plot_3D(vis3D_reduced_parameters_LDA, vis3D_people_list, title='LDA',xlabel='1. komponent LDA',ylabel='2. komponent LDA',zlabel='3. komponent LDA')
+    make_labelmasked_plot_3D(vis3D_reduced_parameters_LDA, vis3D_people_list, title='LDA',xlabel='1. komponent LDA',ylabel='2. komponent LDA',zlabel='3. komponent LDA')
 except: pass
 
 plt.show()
