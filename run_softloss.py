@@ -4,7 +4,7 @@
 #
 # author: Adam Kurowski
 # mail:   akkurowski@gmail.com
-# date:   25.08.2020
+# date:   19.12.2021
 #------------------------------------------------------------------------------#
 
 # importy bibliotek
@@ -245,40 +245,12 @@ output        = Lambda(lambda x: K.l2_normalize(x,axis=1))(x) # normalizacja wek
 encoder       = keras.Model(encoder_input, output, name="encoder")
 encoder.summary()
 
-# Dekoder - ta sieć stara się odzyskać z wektora wygenerowanego przez koder
-# oryginalny MFCC-gram wejściowy
-decoder_input = Input(shape=80,)
-x             = Reshape((5,16,1))(decoder_input)
-x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x)
-x_inc_out     = x
-x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x)
-# x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x) # Jako, że nie wykorzystujemy dekodera, a te bloki dalej zużywają moc 
-# obliczniową, pozwoliłem sobie zakomentować część warstw dla przyspieszenia obliczeń.
-# x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x)
-# x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x)
-x             = Add()([x,x_inc_out])
-x             = UpSampling2D((2,2))(x)
-x             = Conv2DTranspose(32, (3,3), activation=PReLU(), padding='same')(x)
-x_inc_out     = x
-x             = Conv2DTranspose(32, (3,3), activation=PReLU(), padding='same')(x)
-# x             = Conv2DTranspose(32, (3,3), activation=PReLU(), padding='same')(x)
-# x             = Conv2DTranspose(32, (3,3), activation=PReLU(), padding='same')(x)
-# x             = Conv2DTranspose(32, (3,3), activation=PReLU(), padding='same')(x)
-x             = Add()([x,x_inc_out])
-x             = UpSampling2D((2,2))(x)
-x             = Conv2DTranspose(16, (3,3), activation=PReLU(), padding='same')(x)
-x             = UpSampling2D((2,2))(x)
-decoded       = Conv2DTranspose(1, (3,3), activation=PReLU(), padding='same')(x)
-decoder       = keras.Model(decoder_input, decoded, name="decoder")
-decoder.summary()
-
-# Klasa spinająca ze sobą koder, dekoder i moduł obliczający stratę AM-Softmax
-class SoftAE(keras.Model):
-    def __init__(self, encoder, decoder, **kwargs):
-        super(SoftAE, self).__init__(**kwargs)
+# Klasa realizująca koder sieci uczącej się metryk dystansu, wykorzystujący stratę AM-Softmax
+class SoftmaxDistanceMetricEncoder(keras.Model):
+    def __init__(self, encoder, **kwargs):
+        super(SoftmaxDistanceMetricEncoder, self).__init__(**kwargs)
         # Uchwyty do sieci kodera, dekodera
         self.encoder        = encoder
-        self.decoder        = decoder
         
         # Dane i struktury straty AM-softmax
         self.enc_vec_width  = self.encoder.output_shape[1] # do obliczeń z góry musimy znać rozmiar wyjścia kodera.
@@ -313,7 +285,6 @@ class SoftAE(keras.Model):
             # to nie są zwykłe liczby, ale mają też dodatkowe fane pozwalające potem
             # optymalizatorowi wykonać algorytm wstecznej propagacji błędów
             encoded        = self.encoder(data)
-            reconstruction = self.decoder(encoded)
             
             # Strata do klasteryzacji: AM-softmax, materiał źródłowy implementacji:
             # [1] https://arxiv.org/pdf/1801.05599.pdf
@@ -346,37 +317,15 @@ class SoftAE(keras.Model):
             # więcej informacji na ten temat zawierają źródła [3] i [4]
             AM_sftmx_loss   = tf.nn.softmax_cross_entropy_with_logits(labels=labels,logits=AM_softmax_logits)
             AM_sftmx_loss   = tf.reduce_mean(AM_sftmx_loss)
-
-            # błąd rekonstrukcji - ma być mały bo chcemy żeby z parametrów dało się możliwie 
-            # dokładnie odzyskać MFCC-gram, spowoduje to też, że w ramach jednego mócy mamy większą 
-            # różnorodność położenia - więcej informacji o "niuansach"
-            reconstruction_loss = tf.reduce_mean(
-                keras.losses.binary_crossentropy(data, reconstruction)
-            )*TRN_REC_CORRECT_FCTR*1 
-            
-            # chcemy, aby algorytm rozmieszczał punkty z pewnym marginesem - dlatego premiujemy różne punkty
-            # w przestrzeni poprzez sumę sinusów ich współrzędnych. Dzięki temu najlepsze będą te punkty w przestrzeni,
-            # które dla wsztstkich współrzędnych mają ujemny sinus (łatwo to sobie zwizualizować w wolframie np funkcją sin(x)+sin(y)
-            adversarial_loss = tf.reduce_mean(tf.math.sin(encoded/0.3))*NUM_LABELS*1
-            
-            reconstruction_loss = reconstruction_loss*0
-            # AM_sftmx_loss = AM_sftmx_loss*0
-            adversarial_loss    = adversarial_loss*0
-           
-            # sumujemy straty bez ważenia jednej lub drugiej jako bardziej lub mniej ważną
-            total_loss = reconstruction_loss + AM_sftmx_loss + adversarial_loss
         
         # Po dokonaniu wszystkich obliczeń możemy nareszcie zaaplikować poprawki wynikające z gradientu obliczonej 
         # funkcji straty i zakończyć ten etap algorytmu treningu.
-        grads = tape.gradient(total_loss, self.trainable_weights)
+        grads = tape.gradient(AM_sftmx_loss, self.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
         
         # zwracamy informację o tym, jakie to wykonanie train_step miało miary straty
         return {
-            "val_loss": total_loss,
-            # "rec_loss": reconstruction_loss,
-            # "AM_sftmx_loss": AM_sftmx_loss,
-            # "adv_loss": adversarial_loss,
+            "val_loss": AM_sftmx_loss
         }
     
     # funkcja wykonywana gdy chcemy uruchomić funkcję predict() na obiekcie klasy SoftAE - ważna jeżeli
@@ -384,11 +333,10 @@ class SoftAE(keras.Model):
     # na jakich nam zależy
     def call(self, inputs):
         encoded = self.encoder(inputs)
-        decoded = self.decoder(encoded)
-        return decoded
+        return encoded
 
-# tworzymy obiekt klasy SoftAE i podpinamy do niego wcześniej utworzone podsieci (koder, dekoder i klasyfikator)
-autoencoder = SoftAE(encoder,decoder)
+# tworzymy obiekt klasy SoftmaxDistanceMetricEncoder, który przeprowadza proces nauki metryki dystansu (dokładniej - kodera sieci syjamskiej)
+softmax_coder = SoftmaxDistanceMetricEncoder(encoder)
 
 # Użytkownik może zdecydować, czy chce wczytać wagi z poprzedniego uruchomienia algorytmu, czy rozpocząć trening "od zera".
 if ask_for_user_preference('Załadować ostatnie zachowane wagi sieci?'):
@@ -396,7 +344,7 @@ if ask_for_user_preference('Załadować ostatnie zachowane wagi sieci?'):
     # mogłyby być odczytane.
     try:
         print('wagi zostaną przywrócone')
-        autoencoder.load_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
+        softmax_coder.load_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
     except:
         print()
         print('odczytywanie wag się nie powiodło - czy skrypt był już wywoływany i wydane zostało polecenie zapisu wag do późniejszego użytku?')
@@ -429,7 +377,7 @@ else:
     print()
     # tworzymy optymalizator i ustawiamy np. lr - czyli współczynnik prędkości nauki
     opt = optimizers.Adam(lr=LEARNING_RATE, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
-    autoencoder.compile(optimizer=opt) # kompilujemy model
+    softmax_coder.compile(optimizer=opt) # kompilujemy model
 
     # Teraz utworzymy tzw. callbacki, czyli procedury uruchamiane przez Kerasa w trakcie procesu treningu.
     # Wykorzystamy kilka gotowych callbacków, które zapewnią nam autozapis wyników i możliwość śledzenia postępów
@@ -444,30 +392,38 @@ else:
     # tensorboard --logdir=<miejsce przechowywania danych treningu>
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(PROGRESS_LOGGING_DIR,generate_timestamp()))
 
-    # Ten callback pozwala uruchomić i skonfigurować autozapis modelu w wybranym miejscu na dysku, będzie on miał miejsce
-    # co n epok, można przywrócić zapisane tak wagi kopiując pliki odpowiadające tym, które są w folderze z zapisem wagi
-    # z ostatniego uruchomienia skryptu i zmianie nazwy na domyślną wykorzystywaną przez skrypt.
-    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,"weights_bkp_{epoch:02d}_{AM_sftmx_loss:.2f}"),
-        save_freq='epoch', period=100,
-        save_best_only=True)
-    
+    # Włąsny callback, który monitoruje funkcję straty i zapisuje model w momencie osiągnięcia najlepszego
+    # wyniku zanotowanego w całej historii treningu
+    class PeriodicWeightSaver(keras.callbacks.Callback):
+        def __init__(self, saving_dir, file_name, interval):
+            self.saving_dir = saving_dir
+            self.interval   = interval
+            self.file_name  = file_name
+        
+        def on_epoch_end(self,epoch,logs=None):
+            if epoch%self.interval == 0:
+                saving_fname = f"{self.file_name}_epoch_{epoch}_loss_{logs['val_loss']}"
+                self.model.save_weights(os.path.join(self.saving_dir,saving_fname))
+                
+
     # Włąsny callback, który monitoruje funkcję straty i zapisuje model w momencie osiągnięcia najlepszego
     # wyniku zanotowanego w całej historii treningu
     class BestSpecimenCallback(keras.callbacks.Callback):
         def __init__(self, saving_dir, file_name):
-            self.best_loss     = None
-            self.saving_dir    = saving_dir
-            self.file_name     = file_name
+            self.best_loss  = None
+            self.saving_dir = saving_dir
+            self.file_name  = file_name
         
         def on_epoch_end(self,epoch,logs=None):
-            saving_indicator =''
             if (self.best_loss is None) or (logs["val_loss"]<self.best_loss):
                 self.best_loss = logs["val_loss"]
-                self.model.save_weights(os.path.join(self.saving_dir,self.file_name))
-                saving_indicator =' update!'
-            logs.update({'avg_loss':logs["val_loss"]})
-            logs.update({'best_loss':self.best_loss})
+                
+                saving_fname = f"{self.file_name}_epoch_{epoch}_loss_{logs['val_loss']}"
+                self.model.save_weights(os.path.join(self.saving_dir,saving_fname))
+                
+                saving_fname = f"{self.file_name}"
+                self.model.save_weights(os.path.join(self.saving_dir,saving_fname))
+            
     
     run_timestamp                = generate_timestamp()
     best_specimen_bkp_name       = 'best_specimen_'+run_timestamp
@@ -490,7 +446,7 @@ else:
     # algorytm treningu zwolni po kilku pierwszych, "szybkich" epokach).
     try:
         while True:
-            autoencoder.fit(input_data,labels_as_onehot, epochs = 10_000, batch_size=64, callbacks=[tensorboard_callback, model_checkpoint_callback, best_specimen_saver_callback]) # uruchamiamy trening
+            softmax_coder.fit(input_data,labels_as_onehot, epochs = 10_000, batch_size=64, callbacks=[tensorboard_callback, best_specimen_saver_callback]) # uruchamiamy trening
             
             print()
             print('ograniczenie epok osiągnięte, restart procedury treningowej')
@@ -499,26 +455,7 @@ else:
     except KeyboardInterrupt:
         print('\n\ntrening przerwany ręcznie')
     last_specimen_bkp_name = 'last_training_weights'+run_timestamp
-    autoencoder.save_weights(os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,last_specimen_bkp_name))
-
-
-# Przetestujemy sobie działanie sieci poprzez zakodowanie jednego z przykładów
-inexample = input_data[0:1,:,:,:]
-decoded_example = autoencoder.predict(inexample)
-
-# Wykreślimy wyniki jako rysunek - na górze przed przepuszczeniem MFCC-gramu przez sieć
-# na dole - po przejściu przez sieć (zamiana na wektor i rekonstrukcja z powrotem)
-plt.figure()
-plt.subplot(2,1,1)
-plt.title('przykładowy MFCC-gram (oryginał)')
-plt.imshow(inexample[0,:,:,0])
-plt.grid()
-plt.colorbar()
-plt.subplot(2,1,2)
-plt.title('rekonstrukcja MFCC-gramu')
-plt.imshow(decoded_example[0,:,:,0])
-plt.grid()
-plt.colorbar()
+    softmax_coder.save_weights(os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,last_specimen_bkp_name))
 
 # Dodatkowo obejrzymy sobie przestrzeń punktów po redukcji jej z 80 wymiarów do 2
 # wykorzystamy prostą metodę PCA, LDA oraz nieco bardziej zaawansowaną t-SNE
@@ -557,8 +494,7 @@ else:
 # dokonujemy rzutowania poprzez wykonanie metody fit_transform()
 reduced_parameters_PCA   = pca.fit_transform(parameters)
 
-print(parameters.shape)
-print(people_list.shape)
+print()
 
 if lda is not None:
     reduced_parameters_LDA   = lda.fit(parameters,people_list).transform(parameters)
@@ -613,10 +549,10 @@ if not skip_training:
         if not (choice == 'pomiń zapis'):
             if choice == 'najlepsze':
                 try:
-                    autoencoder.load_weights(os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,best_specimen_bkp_name))
+                    softmax_coder.load_weights(os.path.join(WEIGHTS_TRAINING_BACKUP_DIR,best_specimen_bkp_name))
                 except:
-                    print("Best weights not found, saving the latest weights set (maybe the training was too short).")
-            autoencoder.save_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
+                    print("Nie odnaleziono zapisu wag najlepszych, zapis zostanie wykonany z wykorzystaniem ostatnich wag (być może przez krótki trening nie wyodrębniono jeszcze najlepszych wag).")
+            softmax_coder.save_weights(os.path.join(DATA_STORAGE_DIR,'autoencoder_weights'))
     else:
         print('wagi zostaną skasowane')
 
